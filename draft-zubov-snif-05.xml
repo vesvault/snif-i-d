@@ -1,0 +1,1812 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!DOCTYPE rfc [
+  <!ENTITY nbsp    "&#160;">
+  <!ENTITY zwsp   "&#8203;">
+  <!ENTITY nbhy   "&#8209;">
+  <!ENTITY wj     "&#8288;">
+]>
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude" submissionType="IETF" docName="draft-zubov-snif-05" category="exp" ipr="trust200902" obsoletes="" updates="" xml:lang="en" symRefs="true" sortRefs="false" tocInclude="true" version="3">
+	<front>
+    <title abbrev="SNIF">Deploying Publicly Trusted TLS Servers on Devices Behind NAT Using SNI-based End-to-End TLS Forwarding (SNIF)</title>
+    <seriesInfo name="Internet-Draft" value="draft-zubov-snif-05"/>
+    <author initials="J." surname="Zubov" fullname="Jim Zubov">
+      <organization>VESvault Corp</organization>
+      <address>
+        <email>jz@vesvault.com</email>
+        <uri>https://snif.host</uri>
+      </address>
+    </author>
+    <date year="2026" month="June" day="29"/>
+    <abstract>
+      <t>
+   This document proposes a solution, referred to as SNIF, that provides
+   the means for any Internet-connected device to:</t>
+      <ul spacing="normal">
+        <li>allocate a globally unique anonymous hostname;</li>
+        <li>obtain and maintain a publicly trusted X.509 certificate
+     issued for the allocated hostname;</li>
+        <li>accept incoming TLS connections on specific TCP ports of the
+     allocated hostname from any TLS clients that are capable of sending
+     Server Name Indication.</li>
+      </ul>
+      <t>
+   The private key associated with the X.509 certificate is securely
+   stored on the TLS terminating device, and is never exposed to any
+   other party at any step of the process.</t>
+    </abstract>
+    <note>
+      <name>About This Document</name>
+      <t>
+   This note is to be removed before publishing as an RFC.</t>
+      <t>
+   Status information for this document may be found at
+   <eref target="https://datatracker.ietf.org/doc/draft-zubov-snif"/>.</t>
+      <t>
+   Information can be found at <eref target="https://snif.host"/>.</t>
+      <t>
+   Source for this draft and an issue tracker can be found at
+   <eref target="https://github.com/vesvault/snif-i-d"/>.</t>
+    </note>
+  </front>
+  <middle>
+    <section anchor="sect-1" numbered="true" toc="default">
+      <name>Introduction</name>
+      <t>
+   Many Internet-connected devices and services operate behind NAT or on
+   a dynamic IP address, and therefore cannot be reached by inbound
+   connections over the Internet: they have no stable, publicly routable
+   address at which a TLS client can establish a connection to them. An
+   Internet-of-Things (IoT) device is a common example, but the same
+   constraint applies to a wide range of physical and virtual hosts. A
+   dedicated relay is commonly used to route the communications between
+   such a device and its intended users. While all communications are
+   recommended to be TLS encrypted, if the relay terminates each TLS
+   connection - as a conventional reverse proxy does - it gains access to
+   the unencrypted traffic between the devices and user clients, which
+   may pose an undesirable security risk.</t>
+      <t>
+   Designing a dedicated relay that works in end-to-end encrypted mode,
+   where the TLS tunnel is established between the device and the
+   client, and is passed by the relay in an encrypted form, raises
+   additional challenges. Clients expect to be able to verify the
+   authenticity of the TLS certificate presented by the device they
+   are connecting to. Public certificate authorities require validation
+   of the ownership of the hostname the certificate is being requested for,
+   using certain challenge mechanisms. Therefore, the device needs
+   to allocate a unique hostname, and to be able to complete the CA
+   challenge in order to acquire a trusted certificate.</t>
+      <t>
+   Alternatively, the client may decide to use a different certificate
+   trust scheme, not based on publicly trusted root CAs. In this case,
+   the client is limited to specifically built software with custom
+   trust rules, or the system trust root on the client device needs to
+   be customized.</t>
+      <t>
+   This document proposes a solution, referred to as SNIF, that allows any
+   common TLS client with standard root CAs, such as a web browser, to
+   establish a trusted end-to-end TLS connection with a device behind
+   NAT using the unique hostname permanently allocated to the device, via
+   a dedicated relay.</t>
+      <t>
+   IoT devices are a common motivating case, but SNIF is applicable to
+   any physical or virtual device, service, or software that is behind
+   NAT, on a dynamic address, or otherwise unable to accept inbound
+   connections directly, and that can benefit from accepting trusted TLS
+   connections to an anonymous hostname.</t>
+      <section anchor="sect-1.1" numbered="true" toc="default">
+        <name>Notational Conventions</name>
+        <t>
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in BCP
+   14 <xref target="RFC2119" format="default"/> <xref target="RFC8174" format="default"/> when, and only when, they appear in all
+   capitals, as shown here.</t>
+      </section>
+    </section>
+    <section anchor="sect-2" numbered="true" toc="default">
+      <name>Overview</name>
+      <t>
+   <em>SNIF CA Proxy</em> is a combination of web-based services and background
+   processes that run on a publicly accessible server, normally on the
+   same physical server as SNIF Relay. SNIF CA Proxy allocates hostnames
+   for SNIF Connectors and facilitates issuing and renewing X.509
+   certificates <xref target="RFC5280" format="default"/> without having access to the Connectors' private keys.
+   The functions of SNIF CA Proxy are described in <xref target="sect-3" format="default"/>.</t>
+      <t>
+   <em>SNIF Relay</em> is a process that runs on a publicly accessible server,
+   normally on the same physical server as SNIF CA Proxy. SNIF Relay
+   facilitates end-to-end TLS connections, <xref target="RFC8446" format="default"/> or older versions, between SNIF Clients and SNIF
+   Connectors. The functions of SNIF Relay are described in <xref target="sect-4" format="default"/>.</t>
+      <t>
+   <em>SNIF Connector</em> is a software process that runs on a device behind
+   NAT, or on any other type of device or host that intends to provide
+   TLS-based services that can be accessed by general purpose TLS clients
+   using SNIF Relay.
+   SNIF Connector can be implemented as a standalone process that
+   communicates with the TLS server processes over local filesystem and
+   sockets, or as an integral part of a TLS server process.</t>
+      <t>
+   <em>SNIF Client</em> is any common TLS-compatible client with SNI capability <xref target="RFC6066" format="default"/>,
+   such as a web browser or an email client, that connects to a SNIF
+   hostname provided by a specific SNIF Connector. SNIF Client does not
+   need any awareness of SNIF, or of any protocols described in this
+   document.</t>
+      <t>
+   <em>Certificate Authority (CA)</em> is a service that issues public trusted
+   TLS Certificates to specific hostnames when requested by the hostname
+   owner, upon validating the ownership of the hostname. CA does not
+   need any awareness of SNIF, except for a working relationship with
+   the SNIF CA Proxy that requests certificates using protocols
+   supported by the CA.</t>
+      <t>
+   <em>SNIF Peripheral Process</em> is any kind of additional service that
+   extends or supplements functions of SNIF, in a way not defined within
+   the scope of this document.</t>
+    </section>
+    <section anchor="sect-3" numbered="true" toc="default">
+      <name>SNIF CA Proxy Protocol</name>
+      <t>
+   SNIF CA Proxy Protocol is designed for securely acquiring and
+   maintaining a publicly trusted TLS/SSL X.509 certificate issued by a
+   Certificate Authority to a uniquely allocated hostname, by an agent
+   that has no direct control over that hostname, or over a server the
+   hostname is pointing to.</t>
+        <t>
+   SNIF CA Proxy accepts requests from SNIF Connectors via HTTP / HTTPS.</t>
+        <t>
+   SNIF CA Proxy interacts with the CA using protocols supported by the
+   CA, such as ACME <xref target="RFC8555" format="default"/>, not covered by this document.</t>
+      <section anchor="sect-3.1" numbered="true" toc="default">
+        <name>Protocol Variables</name>
+        <t>
+   Each SNIF Connector MUST be configured with an initiation URL
+   ({initUrl}), which is specific to the SNIF CA Proxy server the
+   Connector intends to work with. Depending on the CA Proxy rules,
+   {initUrl} might be unique for each Connector, or common for multiple
+   Connectors.</t>
+        <t>
+   The canonical name {cn} is received by a SNIF Connector in response
+   to the CN Allocation Request (<xref target="sect-3.3" format="default"/>),
+   and might be either a single hostname or a wildcard starting with "*.",
+   depending on the CA Proxy rules.</t>
+        <t>
+   {cn_host} is a hostname derived from the {cn} - it is identical to
+   {cn} in case of a single-host CN, or is the {cn} with truncated
+   initial "*." in case of a wildcard CN. Note that {cn_host} is
+   different than the SNIF hostname in case of a wildcard CN.</t>
+        <t>
+   Each SNIF Connector MAY be configured with an API URL base - {apiUrl}
+   - identifying the SNIF CA Proxy. If configured, the {apiUrl} SHOULD be
+   HTTPS. The {apiUrl} pertains only to certificate enrollment with the
+   CA Proxy; it is not used to authenticate the Relay (see {relayHost} in
+   <xref target="sect-4.2" format="default"/>).</t>
+        <t>
+   In case {apiUrl} is not configured - the SNIF Connector MUST
+   derive {apiUrl} from the {cn_host}, upon allocating the CN, as
+   following:</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   {apiUrl} := http://{cn_host}/snif-cert/
+]]></artwork>
+      </section>
+      <section anchor="sect-3.2" numbered="true" toc="default">
+        <name>Protocol Flow</name>
+        <t>
+   Upon the initial start or after a hard reset, the Connector SHALL
+   generate a Private Key, which needs to be securely permanently stored
+   by the Connector. Any key algorithm acceptable by the CA can be used,
+   the choice of the algorithm should be made according to the CA
+   guidelines and industry practices.</t>
+        <t>
+   The Connector SHALL send a CN Allocation Request using the
+   {initUrl}.</t>
+        <t>
+   Having the canonical name {cn}, the Connector SHALL generate
+   a CSR <xref target="RFC2986" format="default"/> using
+   the Private Key, the subject containing the {cn}. The CSR subject may
+   or may not have other fields besides {cn}, according to the specific
+   requirements of the CA.</t>
+        <t>
+   The Connector SHALL issue a CSR Submission Request to send the CSR
+   to the CA Proxy.</t>
+        <t>
+   Once the CSR is submitted, the Connector MUST permanently store the
+   {cn} by some means - to minimize the storage compartments it might be
+   practical to generate and store a dummy self-signed certificate with
+   the {cn} in the subject until it gets replaced with a trusted
+   certificate issued by the CA.</t>
+        <t>
+   At this point, the Connector will normally know the SNIF hostname it
+   will be using with the SNIF Relay - it matches the {cn} in case of a
+   single host CN, or is one sub-level down from a wildcard {cn}, the
+   name being derived by the Connector in a way that cannot be derived
+   from the {cn} and the public key, e.g. a hash of the Private Key.</t>
+        <t>
+   The Connector can now send a Certificate Download Request, and
+   MUST verify the returned Certificate. If the Certificate is valid -
+   the Connector MUST permanently store it.</t>
+        <t>
+   If the Certificate Download Request fails - the Connector SHOULD
+   repeat the request after certain delay. In case the response was
+   401 and the {authUrl} is returned in a header, and the Connector has
+   the means of communicating with the device user - the Connector also
+   SHOULD alert the user and bring {authUrl} to their attention by some
+   means, so the user can complete the required authorization steps. If
+   the Connector has no means of alerting the user, which is often the
+   case with IoT devices - the user MUST be provided with some
+   external means of authorizing with the CA Proxy, not covered by this
+   document.</t>
+        <t>
+   Once the Certificate is validated and stored, the Connector is
+   capable of terminating SNIF connections, and may proceed launching a
+   SNIF Control Connection (<xref target="sect-4.2" format="default"/>).
+   The Connector SHOULD communicate its SNIF hostname by some means to
+   the SNIF Clients that will be accessing the Connector. The means of
+   such communication are not covered by this document.</t>
+        <t>
+   The Connector SHOULD watch for the expiration of the stored
+   Certificate. If the Certificate is about to expire in 7 days or less,
+   or has already expired - the Connector SHOULD send a Certificate
+   Download Request, and repeat with appropriate delays until the
+   renewed Certificate is successfully downloaded and verified.</t>
+        <t>
+   At any stage of the flow, if the Connector receives unexpected volume
+   of rejections or inconsistent responses from the CA Proxy, the
+   Connector MAY decide to hard reset the storage and start the flow
+   over from the beginning. In such case, the Connector will have to
+   re-send its new SNIF hostname to any concerned SNIF Clients, the
+   means of such communication is not covered by this document.</t>
+      </section>
+      <section anchor="sect-3.3" numbered="true" toc="default">
+        <name>CN Allocation Request</name>
+        <dl newline="false" spacing="normal" indent="18">
+          <dt>Connection from:</dt>
+          <dd>SNIF Connector</dd>
+	  <dt>Connection to:</dt>
+          <dd>SNIF CA Proxy</dd>
+          <dt>Protocol:</dt>
+          <dd>https or http</dd>
+        </dl>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   GET {initUrl}
+]]></artwork>
+        <t>
+   Response 200: Canonical Name (CN) is successfully allocated. The
+   response headers MUST include X-SNIF-CN: with the value of the
+   allocated {cn}, either a wildcard starting with "*.", or a single
+   hostname, depending on the CA Proxy rules. The CA Proxy MUST NOT
+   return a CN that's been previously returned by another CN Allocation
+   Request. The Connector SHOULD ignore the response body.</t>
+        <t>
+   Any other response: Error, try again later.</t>
+      </section>
+      <section anchor="sect-3.4" numbered="true" toc="default">
+        <name>CSR Submission Request</name>
+        <dl newline="false" spacing="normal" indent="18">
+          <dt>Connection from:</dt>
+          <dd>SNIF Connector</dd>
+	  <dt>Connection to:</dt>
+          <dd>SNIF CA Proxy</dd>
+          <dt>Protocol:</dt>
+          <dd>https or http</dd>
+        </dl>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   PUT {apiUrl}{cn_host}.csr
+   Content-Type: application/pkcs10
+]]></artwork>
+        <t>
+   The request body MUST contain a PEM encoded PKCS#10 CSR <xref target="RFC5967" format="default"/>,
+   the newlines are either &lt;CR&gt;&lt;LF&gt; or &lt;LF&gt;, the length of the body
+   SHOULD NOT exceed 16384 bytes.</t>
+        <t>
+   Note that a CSR for the specific allocated CN can be submitted to the
+   CA Proxy once in a lifetime. In case of an incorrect submission the
+   Connector SHOULD hard reset the storage and restart the flow from the
+   beginning, including allocating a new CN.</t>
+        <t>
+   Response 201: the CSR is successfully submitted. The response headers
+   MAY include X-SNIF-AuthUrl: with the value of an {authUrl}, that
+   SHOULD, if possible, be communicated to the user to authorize the
+   certificate issuance.</t>
+        <t>
+   Response 403: the CSR for this CN has already been submitted, or is
+   denied by the CA Proxy rules. If the Connector receives 403, it
+   SHOULD hard reset the storage and restart the CA Proxy flow from the
+   beginning.</t>
+        <t>
+   Response 404: the CN was not allocated.</t>
+        <t>
+   Any other response: Error, try again later.</t>
+      </section>
+      <section anchor="sect-3.5" numbered="true" toc="default">
+        <name>Certificate Download Request</name>
+        <dl newline="false" spacing="normal" indent="18">
+          <dt>Connection from:</dt>
+          <dd>SNIF Connector</dd>
+	  <dt>Connection to:</dt>
+          <dd>SNIF CA Proxy</dd>
+          <dt>Protocol:</dt>
+          <dd>https or http</dd>
+        </dl>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   GET {apiUrl}{cn_host}.crt
+]]></artwork>
+        <t>
+   The CA Proxy SHOULD check for a cached previously generated
+   Certificate chain for the {cn}. If the cached Certificate chain is
+   found and if it expires in more than 10 days in the future - the
+   cached Certificate chain SHOULD be returned with status 200.
+   Otherwise, if the {cn} has a valid CSR and a proper authorization to
+   issue a certificate - the CA Proxy SHOULD return status 503 and
+   SHOULD launch a background process that communicates with the CA to
+   issue or renew the certificate, and caches the issued Certificate
+   chain for subsequent Certificate Download Requests.</t>
+        <t>
+   Response 200: the Certificate chain is returned. The Content-Type of
+   such response SHOULD be "application/x-x509-ca-cert". The response
+   body MUST be a PEM encoded X.509 certificate chain, the issued
+   certificate being the first member, the newlines are either &lt;CR&gt;&lt;LF&gt;
+   or &lt;LF&gt;, the length of the body SHOULD NOT exceed 65535 bytes.</t>
+        <t>
+   Response 503: the Certificate is being issued, try later.</t>
+        <t>
+   Response 401: Certificate issuance authorization is required. The
+   response headers MAY include X-SNIF-AuthUrl: with the value of an
+   {authUrl}, that SHOULD, if possible, be communicated to the user to
+   authorize the certificate issuance. If the CA Proxy expects to work
+   with Connectors that cannot communicate with the user, it MUST
+   include external means of the authorization, not covered by this
+   document.</t>
+        <t>
+   Response 404: the CN was not allocated, or the CSR was not submitted.</t>
+        <t>
+   Any other response: Error, try again later.</t>
+      </section>
+    </section>
+    <section anchor="sect-4" numbered="true" toc="default">
+      <name>SNIF Relay Protocol Suite</name>
+      <t>
+   The SNIF Relay Protocol Suite defines the communications among a SNIF
+   Relay, the SNIF Connectors that register with it, the SNIF Clients
+   that reach those Connectors through it, and the SNIF Peripheral
+   Processes attached to the Relay.</t>
+      <t>
+   The suite is defined in two layers. <xref target="sect-4.1" format="default"/> and
+   <xref target="sect-4.2" format="default"/> define, independently of any transport,
+   the SNIF Messages exchanged and the logical connection roles they are
+   exchanged over. <xref target="sect-4.3" format="default"/> and
+   <xref target="sect-4.4" format="default"/> define two interchangeable transport
+   bindings that realize those roles: SNIF over TCP, which every conformant
+   Relay and Connector MUST support, and SNIF over QUIC, which is OPTIONAL.</t>
+      <t>
+   Across every binding, the SNIF Relay forwards the end-to-end TLS
+   traffic of a SNIF Client as an opaque octet stream. The Relay MUST
+   NOT terminate, decrypt, or otherwise interpret that traffic - save for
+   the single Encrypted ClientHello exception specified by the blind-relay
+   invariant (<xref target="sect-4.2" format="default"/>) - and the
+   Connector's certificate private key is never available to the Relay
+   (see also <xref target="sect-5" format="default"/>).</t>
+      <section anchor="sect-4.1" numbered="true" toc="default">
+        <name>SNIF Messages</name>
+        <t>
+   A SNIF Message consists of one or more ASCII characters excluding
+   non-printable characters, terminated by &lt;CR&gt;&lt;LF&gt;.</t>
+        <t>
+   The total length of a SNIF Message, including the terminal &lt;CR&gt;&lt;LF&gt;,
+   SHOULD NOT exceed 4096 bytes.</t>
+        <t>
+   8-bit characters are discouraged. If 8-bit characters are used, they
+   SHOULD comply with UTF-8 <xref target="RFC3629" format="default"/>.</t>
+        <t>
+   The receiving party SHOULD silently ignore any invalid or malformed
+   SNIF message.</t>
+        <t>
+   The following messages are defined. The "Carried on" role names the
+   logical connection role (<xref target="sect-4.2" format="default"/>) the message
+   is exchanged over; the transport bindings (<xref target="sect-4.3" format="default"/>,
+   <xref target="sect-4.4" format="default"/>) specify how that role is realized on the
+   wire. The message wire formats are unchanged from earlier revisions of this
+   document, so existing TCP deployments remain conformant.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF LISTEN {hostname}
+   SNIF LISTEN {hostname} {options}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Sent by:</dt><dd>SNIF Connector</dd>
+<dt>Carried on:</dt><dd>Control Connection</dd>
+</dl>
+        <t>
+   Informs the Relay that the Connector is ready to accept incoming TLS
+   connections to {hostname} through the Relay. {hostname} MUST specify a
+   single host (no wildcards) and MUST match the CN of the Connector's
+   TLS certificate, either matching a wildcard CN or exactly matching a
+   single-host CN. SHOULD be sent only once per Control Connection; the
+   Relay SHOULD ignore invalid or subsequent SNIF LISTEN messages.</t>
+        <t>
+   {options}, if present, is a whitespace-separated list of tokens by
+   which the Connector requests optional behaviors for the session. No
+   options are defined by this document; the field is reserved for future
+   use. A Relay MUST ignore any option token it does not recognize, and a
+   Connector MUST NOT assume an unrecognized option took effect. This
+   keeps SNIF LISTEN forward compatible: future revisions may define
+   option tokens (for example, to select a transport behavior) without
+   breaking existing deployments.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF CONNECT {conn_id} {dst_host}:{dst_port} {fwd_host}:{fwd_port} {cln_addr}:{cln_port}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Sent by:</dt><dd>SNIF Relay</dd>
+<dt>Carried on:</dt><dd>Control Connection</dd>
+</dl>
+        <t>
+   Informs the Connector of an incoming TLS connection from a Client to
+   the Connector's {dst_host}, TCP port {dst_port}. {conn_id} is a unique
+   alphanumeric connection identifier assigned by the Relay.
+   {fwd_host}:{fwd_port} is the address of the Relay node that holds this
+   Client Connection. In the TCP binding it is the address at which that
+   node accepts the corresponding Service Connection
+   (<xref target="sect-4.3" format="default"/>). In the QUIC binding
+   {fwd_host} identifies the node and the Service stream is delivered to it
+   over a QUIC connection on the snif port
+   (<xref target="sect-4.4" format="default"/>): the Connector reuses its
+   Control Connection to that node when it has one, and otherwise (in a
+   cluster) opens a new Control Connection to {fwd_host} on the snif port.
+   {fwd_port} pertains to the TCP Service Connection and is not used in the
+   QUIC binding.
+   {cln_addr}:{cln_port} are the Client's remote IPv4/IPv6 address and
+   TCP port, {cln_addr} enclosed in "[" brackets "]". The Relay sends
+   SNIF CONNECT only to Connectors whose {hostname} matches {dst_host};
+   the Connector need not verify {dst_host}.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF ACCEPT {conn_id}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Sent by:</dt><dd>SNIF Connector</dd>
+<dt>Carried on:</dt><dd>Service Connection</dd>
+</dl>
+        <t>
+   Binds a newly opened Service Connection (TCP binding) or Service stream
+   (QUIC binding) to the {conn_id} previously received in a SNIF CONNECT
+   message, signaling that the Connector accepts the connection. It is
+   sent as the leading octets - the in-band SNIF ACCEPT preamble - of the
+   Service Connection or Service stream in both bindings
+   (<xref target="sect-4.3" format="default"/>,
+   <xref target="sect-4.4" format="default"/>).</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF CLOSE {conn_id}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Sent by:</dt><dd>SNIF Connector</dd>
+<dt>Carried on:</dt><dd>Control Connection</dd>
+</dl>
+        <t>
+   Instructs the Relay to terminate the Client connection with the
+   matching {conn_id} (e.g. to reject a connection). For SNIF CLOSE
+   received from a Connector, the Relay MUST validate that the connection
+   was targeted at the Connector's {hostname}, otherwise ignore the
+   message.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF ABUSE {conn_id} {abuse_score}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Sent by:</dt><dd>SNIF Connector</dd>
+<dt>Carried on:</dt><dd>Control Connection</dd>
+</dl>
+        <t>
+   Instructs the Relay to increase the DoS-protection abuse counter for
+   the Client that initiated {conn_id} by {abuse_score}, an integer from
+   1 to 255 (1 is the score for a normal, non-abusive connection). The
+   Relay MUST validate that {conn_id} was targeted at the Connector's
+   {hostname}, otherwise ignore the message.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF MSG {hostname} {content}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Sent by:</dt><dd>SNIF Connector or SNIF Relay</dd>
+<dt>Carried on:</dt><dd>Control Connection (and IPC FIFO, <xref target="sect-4.6" format="default"/>)</dd>
+</dl>
+        <t>
+   Relayed between the Connector and the SNIF Peripheral Processes
+   attached to the Relay. {content} SHOULD NOT contain whitespace or
+   non-printable characters; its semantics are specific to the targeted
+   Peripheral Process and are out of scope. For SNIF MSG received from a
+   Connector, the Relay MUST verify that {hostname} matches the one
+   associated with the Connector before forwarding to the IPC FIFOs. A
+   SNIF MSG sent by a Connector might, in some circumstances, return to
+   it, and where a Connector holds Control Connections to more than one
+   node of a Relay cluster (<xref target="sect-4.4" format="default"/>) a
+   SNIF MSG for its {hostname} may be delivered to it once on each of
+   them; a Connector MUST therefore process SNIF MSG idempotently and
+   SHOULD account for duplicates to avoid message storms.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   NOOP
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Sent by:</dt><dd>SNIF Connector or SNIF Relay</dd>
+<dt>Carried on:</dt><dd>Control Connection</dd>
+</dl>
+        <t>
+   Carries no action. A Relay receiving NOOP from a Connector SHOULD
+   promptly send NOOP or any other message back, so a Connector MAY use
+   NOOP as a keep-alive ping. In the QUIC binding, transport-level
+   keep-alive (<xref target="sect-4.4" format="default"/>) MAY be used instead.</t>
+      </section>
+      <section anchor="sect-4.2" numbered="true" toc="default">
+        <name>SNIF Connection Roles</name>
+        <t>
+   The protocols below are defined in terms of four logical connection
+   roles. Each transport binding (<xref target="sect-4.3" format="default"/>,
+   <xref target="sect-4.4" format="default"/>) specifies how these roles are
+   realized on the wire.</t>
+        <t>
+   <em>Control Connection</em> is a single, persistent, bidirectional channel
+   between a SNIF Connector and a SNIF Relay that carries asynchronous
+   SNIF Messages. It is always initiated by the Connector. The Connector
+   MUST authenticate to the Relay with the certificate and private key
+   for its SNIF hostname (<xref target="sect-3" format="default"/>); the Relay MUST
+   validate that certificate and, if it is not trusted, MUST close the
+   connection immediately.</t>
+        <t>
+   Each SNIF Connector MAY be configured with a {relayHost} - the
+   hostname identifying the Relay's TLS certificate, by which the
+   Connector authenticates the Relay. {relayHost} is independent of the
+   CA Proxy {apiUrl} (<xref target="sect-3.1" format="default"/>): the CA
+   Proxy and the Relay are commonly the same host but need not be, and the
+   Relay need not serve HTTPS. If {relayHost} is configured, the Connector
+   MUST validate the certificate presented by the Relay against
+   {relayHost} - in both the TCP (<xref target="sect-4.3" format="default"/>)
+   and QUIC (<xref target="sect-4.4" format="default"/>) bindings - closing
+   the connection if the Relay presents no certificate or the certificate
+   does not match. If {relayHost} is not configured, the Connector does not
+   authenticate the Relay's certificate.</t>
+        <t>
+   <em>Service Connection</em> is a bidirectional, reliable, in-order octet
+   stream dedicated to exactly one forwarded SNIF Client connection. It
+   carries the Client's end-to-end TLS traffic as an opaque payload. The
+   Relay MUST treat this payload as opaque ciphertext and MUST NOT
+   attempt to interpret it, save for the Encrypted ClientHello exception
+   in the blind-relay invariant below; the SNI, already interpreted to
+   route the Client Connection, is merely forwarded to the Connector as
+   part of this stream. Each Service Connection is associated with a
+   {conn_id}.</t>
+        <t>
+   <em>Client Connection</em> is the TLS connection between a SNIF Client and
+   the SNIF Relay, in which the Relay acts as a transparent end-to-end
+   forwarder (<xref target="sect-4.5" format="default"/>).</t>
+        <t>
+   <em>IPC FIFO</em> carries communications between nodes of a SNIF Relay
+   cluster and/or between a SNIF Relay and SNIF Peripheral Processes
+   (<xref target="sect-4.6" format="default"/>).</t>
+        <t>
+   Blind-relay invariant: under every binding the Relay MUST be able to
+   route a Client Connection to a Connector using only the Server Name
+   Indication of the Client's TLS ClientHello, and MUST forward the
+   Service Connection payload without the means to decrypt it. The
+   Connector's end-to-end certificate private key MUST NOT be transmitted
+   to, derivable by, or stored on the Relay.</t>
+        <t>
+   The sole exception to "without the means to decrypt it" is the
+   Encrypted ClientHello (ECH) transform of
+   <xref target="sect-4.9" format="default"/>: a Relay configured for ECH
+   MAY decrypt the Client's initial ClientHello solely to recover the
+   Server Name Indication it routes on, and forward the reconstructed
+   inner ClientHello in place of the outer one. This is the only
+   transformation a Relay is permitted to apply to the end-to-end TLS
+   handshake; every octet from the reconstructed ClientHello onward
+   remains opaque. The ECH key used for this transform is distinct from
+   the Connector's end-to-end certificate key and confers no ability to
+   decrypt or impersonate the end-to-end TLS session, which remains
+   subject to the invariant above.</t>
+      </section>
+      <section anchor="sect-4.3" numbered="true" toc="default">
+        <name>SNIF over TCP (baseline)</name>
+        <t>
+   Every conformant SNIF Relay and SNIF Connector MUST support the TCP
+   binding. It realizes the Control Connection as the "snif" protocol and
+   each Service Connection as a separate "snif-srv" connection.</t>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Protocol name (Control):</dt><dd>snif</dd>
+<dt>Protocol name (Service):</dt><dd>snif-srv</dd>
+<dt>Connection from:</dt><dd>SNIF Connector</dd>
+<dt>Connection to:</dt><dd>SNIF Relay</dd>
+</dl>
+        <t>
+   <em>Control Connection.</em> The Connector opens a TCP connection to the
+   hostname matching its certificate CN, which points to the Relay. Upon
+   accepting the TCP connection, the Relay MUST initiate a reversed TLS
+   session as the client peer and MAY supply a client certificate. The
+   Connector MUST initiate TLS as the server peer, using its certificate
+   and private key. If the Connector is configured with {relayHost}
+   (<xref target="sect-4.2" format="default"/>), it MUST require the Relay
+   to present a client certificate valid for {relayHost} and MUST shut
+   down the TLS session and TCP socket if the Relay presents no
+   certificate or it does not match. On successful negotiation the Relay
+   MUST validate the Connector's
+   certificate and, if untrusted, MUST shut down the TLS session and TCP
+   socket immediately. If the host named in the Connector's certificate
+   does not fall within any of the domains served by the Relay, the Relay
+   SHOULD close the connection. Once validated, both peers exchange SNIF Messages
+   (<xref target="sect-4.1" format="default"/>) over the TLS connection. The
+   Connector sends SNIF LISTEN to begin accepting Client connections.</t>
+        <t>
+   <em>Service Connection.</em> In response to a SNIF CONNECT received over the
+   Control Connection, if the Connector accepts the connection it MUST
+   open a TCP connection to {fwd_host}:{fwd_port} and MUST immediately
+   send, as plain TCP, a SNIF ACCEPT {conn_id} message carrying the
+   {conn_id} from the SNIF CONNECT. The Connector MUST then immediately
+   assign all further traffic of that Service Connection to the matching
+   TLS server process. To reject, the Connector SHOULD instead send SNIF
+   CLOSE {conn_id} over the Control Connection. The Connector SHOULD also
+   send any SNIF Message back over the Control Connection on accept to
+   update the keep-alive timer (a copy of the SNIF ACCEPT MAY be used).</t>
+        <t>
+   <em>Relay forwarding.</em> On a valid SNIF ACCEPT, the Relay SHOULD link the
+   Service Connection to the matching Client Connection, forward to it
+   all buffered TLS data previously received from the Client, and begin
+   bidirectional forwarding. The Relay MUST reject any further SNIF
+   ACCEPT bearing an already-linked {conn_id}. If the {conn_id} or
+   message is invalid, or an abuse threshold is reached, the Relay SHOULD
+   terminate the Service Connection immediately. When either the Client
+   or Service Connection closes, or an inactivity timeout elapses, the
+   Relay SHOULD shut down both.</t>
+      </section>
+      <section anchor="sect-4.4" numbered="true" toc="default">
+        <name>SNIF over QUIC (optional)</name>
+        <t>
+   A SNIF Relay and SNIF Connector MAY support the QUIC binding
+   <xref target="RFC9000" format="default"/>. It realizes the Control Connection
+   and all of a Connector's Service Connections as a single QUIC
+   connection: the Control Connection is carried on a dedicated control
+   stream, and each Service Connection is a distinct QUIC stream. This
+   replaces the per-Client outbound connection of the TCP binding, and its
+   transport handshake, with a lightweight per-Client stream open within
+   the already-established QUIC connection, and isolates each forwarded
+   session on its own stream (no cross-session head-of-line blocking),
+   while preserving the blind-relay invariant of
+   <xref target="sect-4.2" format="default"/>. As in the TCP binding the
+   Connector opens each Service stream and admits the connection with SNIF
+   ACCEPT, so no Client payload reaches the Connector before it accepts.</t>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>ALPN protocol identifier:</dt><dd>"snifq/1" (see <xref target="sect-4.7" format="default"/> and <xref target="sect-6" format="default"/>)</dd>
+<dt>QUIC connection from:</dt><dd>SNIF Connector (QUIC client)</dd>
+<dt>QUIC connection to:</dt><dd>SNIF Relay (QUIC server)</dd>
+<dt>Default UDP port:</dt><dd>7123 (the registered "snif" port, see <xref target="sect-6" format="default"/>)</dd>
+</dl>
+        <t>
+   <em>Connection establishment and authentication.</em> The Connector
+   establishes a QUIC connection to the Relay on UDP port 7123 (the
+   registered "snif" port, <xref target="sect-6" format="default"/>), unless a
+   different port has been advertised out of band
+   (<xref target="sect-4.7" format="default"/>). In the QUIC TLS handshake
+   <xref target="RFC9001" format="default"/> the Connector MUST act as the QUIC
+   client and MUST present, via TLS client authentication, the
+   certificate for its SNIF hostname and prove possession of the
+   corresponding private key. The private key MUST NOT be exposed to the
+   Relay or any other party. The Relay MUST validate that certificate
+   exactly as in <xref target="sect-4.3" format="default"/> and MUST close the
+   connection (with a TLS handshake failure) if it is untrusted. The
+   Relay, as QUIC server, presents its own certificate. A Connector
+   configured with {relayHost}
+   (<xref target="sect-4.2" format="default"/>) MUST validate the Relay
+   certificate against {relayHost}, closing the connection if it does
+   not match; a Connector without {relayHost} does not authenticate the
+   Relay certificate. ALPN
+   <xref target="RFC7301" format="default"/> MUST be negotiated to "snifq/1".</t>
+        <t>
+   The TLS roles in the QUIC binding are the reverse of those in the TCP
+   binding (<xref target="sect-4.3" format="default"/>), where the Connector is
+   the TLS server and a Relay certificate is optional. This reversal is
+   inherent to QUIC, which binds the TLS handshake roles to the transport
+   roles <xref target="RFC9001" format="default"/>: the endpoint that
+   initiates the connection is necessarily the TLS client. Because the
+   Connector is typically behind NAT and is the only endpoint able to
+   initiate a connection (<xref target="sect-1" format="default"/>), it MUST be
+   the QUIC client, and therefore the TLS client, and the Relay MUST
+   present a server certificate. A Relay certificate is consequently
+   REQUIRED in this binding rather than optional. A Connector without
+   {relayHost} does not validate it, so it MAY be self-signed; a
+   Connector configured with {relayHost}
+   (<xref target="sect-4.2" format="default"/>) validates the certificate
+   and thereby authenticates the Relay.</t>
+        <t>
+   <em>Control stream.</em> Immediately after the handshake the Connector MUST
+   open one client-initiated bidirectional stream as the Control
+   Connection and send SNIF LISTEN on it. SNIF Messages carried on the
+   Control Connection (<xref target="sect-4.1" format="default"/>) are exchanged
+   on this stream. Transport-level keep-alive (QUIC PING / idle timeout,
+   <xref target="RFC9000" format="default"/>) MAY replace NOOP.</t>
+        <t>
+   <em>Service streams.</em> The Service stream flow mirrors the TCP binding
+   (<xref target="sect-4.3" format="default"/>), with a QUIC stream in place
+   of a dialed-back connection. For each incoming Client Connection the
+   Relay MUST send a single SNIF CONNECT {conn_id} ... message on the
+   control stream and MUST buffer the Client's initial TLS data
+   (<xref target="sect-4.5" format="default"/>) while awaiting acceptance.
+   To accept, the Connector MUST open a client-initiated bidirectional
+   stream and MUST send, as the leading octets of that stream, a single
+   SNIF ACCEPT {conn_id} message terminated by &lt;CR&gt;&lt;LF&gt;, carrying the
+   {conn_id} from the SNIF CONNECT. The Connector MUST then assign all
+   further octets of that stream to the matching TLS server process.</t>
+        <t>
+   In this binding {fwd_host} (<xref target="sect-4.1" format="default"/>)
+   identifies the Relay node that holds the Client Connection and to which
+   the Service stream MUST be delivered; {fwd_port} applies to the TCP
+   dial-back (<xref target="sect-4.3" format="default"/>) and is not used
+   here. When the Connector already holds a Control Connection to that node
+   - the usual case, and always so for a single-node Relay - it opens the
+   Service stream on that connection. When it does not, the clustered case
+   of the following paragraph applies.</t>
+        <t>
+   <em>Clustered Relays.</em> In a SNIF Relay cluster a Client Connection
+   may arrive at a node to which the Connector holds no Control Connection.
+   That node sets {fwd_host} (and, for TCP-capable Connectors, {fwd_port})
+   to its own address and, having no local Control Connection for the
+   Connector, forwards the SNIF CONNECT to a node that does over an IPC
+   FIFO (<xref target="sect-4.6" format="default"/>), which delivers it on
+   the control stream. Because a QUIC stream can be opened only within the
+   connection it belongs to, the Connector cannot serve such a Client on
+   its existing connection; it MUST instead open a new QUIC connection to
+   {fwd_host} on the snif port (UDP 7123 by default, or the port advertised
+   out of band, <xref target="sect-4.7" format="default"/>) and open the
+   Service stream there. This connection is an ordinary Control Connection:
+   the Connector establishes and authenticates it exactly as above, sends
+   SNIF LISTEN on its control stream, and opens the Service stream. The
+   receiving node thereby gains a local Control Connection and routes
+   subsequent Clients for that {hostname} to the Connector directly,
+   without further IPC FIFO relay. Keeping the cross-node leg a QUIC
+   connection also keeps that leg encrypted, preserving the routing-name
+   concealment of the QUIC binding
+   (<xref target="sect-5.2" format="default"/>), and of ECH
+   (<xref target="sect-4.9" format="default"/>) when combined with it,
+   across the cluster.</t>
+        <t>
+   A Connector MAY therefore hold a Control Connection to more than one
+   node of a cluster at once, each opened reactively as Clients arrive on
+   new nodes, so the number of connections a Connector maintains is bounded
+   by the size of the Relay cluster rather than by the number of Clients. A
+   Connector MAY close a Control Connection that has been idle, reverting
+   that node to IPC FIFO relay until a later Client reopens one. Because
+   each such Control Connection carries SNIF MSG
+   (<xref target="sect-4.1" format="default"/>), a Connector that holds
+   Control Connections to multiple nodes MUST process SNIF MSG idempotently
+   (<xref target="sect-4.1" format="default"/>).</t>
+        <t>
+   To reject, the Connector does not open a Service stream, and SHOULD
+   send SNIF CLOSE {conn_id} on the control stream so the Relay can tear
+   down the matching Client Connection promptly rather than awaiting its
+   accept timeout (<xref target="sect-4.5" format="default"/>).</t>
+        <t>
+   <em>Relay forwarding.</em> On a SNIF ACCEPT preamble bearing a known,
+   not-yet-linked {conn_id} the Relay MUST link the Service stream to the
+   matching Client Connection, forward to it all buffered Client TLS data,
+   and begin bidirectional forwarding of the end-to-end TLS payload. The
+   Relay MUST reject a SNIF ACCEPT bearing an unknown or already-linked
+   {conn_id} by aborting that stream (RESET_STREAM plus STOP_SENDING
+   <xref target="RFC9000" format="default"/>). When either the Client
+   Connection or the Service stream ends (FIN or reset), or an inactivity
+   timeout elapses, the Relay MUST end the other. SNIF ABUSE {conn_id} and
+   SNIF CLOSE {conn_id} on the control stream refer to the Service stream
+   by {conn_id}.</t>
+        <t>
+   Flow control: the Relay SHOULD bound the number of concurrent Service
+   streams a Connector may open with MAX_STREAMS
+   <xref target="RFC9000" format="default"/>, and both peers SHOULD set
+   per-stream and per-connection flow-control limits so that a single
+   greedy forwarded session cannot starve other Service streams on the
+   same Connector's connection (see <xref target="sect-5" format="default"/>).</t>
+        <t>
+   <em>Encapsulation overhead.</em> On the Relay-to-Connector leg the Client's
+   end-to-end TLS payload is carried inside the QUIC connection's own
+   encrypted transport, so that leg is encrypted twice: once end-to-end
+   between Client and Connector, and once by QUIC between Relay and
+   Connector. This overhead is inherent to forwarding opaque end-to-end
+   TLS over an encrypted transport, and is the cost of the
+   infrastructure-leg confidentiality the QUIC binding provides
+   (<xref target="sect-5.2" format="default"/>); the TCP binding avoids it
+   by carrying the Service Connection as plain TCP, at the cost of
+   exposing that leg (<xref target="sect-5.2" format="default"/>).</t>
+      </section>
+      <section anchor="sect-4.5" numbered="true" toc="default">
+        <name>SNIF Client Connection Protocol</name>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Protocol name:</dt><dd>snif-cln</dd>
+<dt>Connection from:</dt><dd>Any TLS client with Server Name Indication, such as a web browser or an email client</dd>
+<dt>Connection to:</dt><dd>SNIF Relay</dd>
+</dl>
+        <t>
+   From the Client's perspective, a SNIF Client Connection functions as
+   a direct TLS connection to the device.</t>
+        <t>
+   The ports the Relay is listening to can be any well-known ports for
+   services with persistent TLS, such as https or imaps, or can be any
+   custom ports agreed among the Relay, the Connectors and the Clients.</t>
+        <t>
+   The Relay accepts an incoming TCP connection, receives and buffers
+   the incoming initial data from the client, and attempts to interpret
+   the received data as a TLS handshake.</t>
+        <t>
+   If the received data is not recognized as a TLS handshake, does not
+   contain an SNI record in a supported format, or the SNI hostname does
+   not meet rules defined for the Relay - the Relay SHOULD immediately
+   reject the TLS session with an appropriate error status, and shut
+   down the Client Connection.</t>
+        <t>
+   If the SNI hostname is found acceptable - the Relay allocates a
+   unique {conn_id}, checks if there are current Control Connections
+   that match the SNI hostname, and sends a SNIF CONNECT message over
+   those connections.</t>
+        <t>
+   If there are no active applicable Control Connections, or if the
+   Relay doesn't receive a response from a SNIF Connector within a
+   specified timeframe - the Relay SHOULD forward the same SNIF CONNECT
+   message over IPC FIFOs (if any are open) to alert cluster peer Relays
+   and Peripheral processes of the incoming Client Connection.</t>
+        <t>
+   A Service Connection (TCP binding) or Service stream (QUIC binding)
+   carrying a matching SNIF ACCEPT establishes an end-to-end TLS circuit
+   with the Client Connection. Once established, the Relay
+   bi-directionally forwards all traffic between the Client and the
+   Service Connection until either of the connections is closed or is
+   timed out due to inactivity.</t>
+        <t>
+   Upon receiving a matching SNIF CLOSE - the Relay MUST terminate the
+   Client Connection. If a Service Connection has already been linked it
+   MUST be terminated too, otherwise the Relay SHOULD attempt to
+   gracefully reject TLS on the Client Connection with an appropriate
+   status prior to shutting down TCP.</t>
+      </section>
+      <section anchor="sect-4.6" numbered="true" toc="default">
+        <name>SNIF IPC FIFO Protocol</name>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Protocol name:</dt><dd>snif-fifo</dd>
+<dt>Connection from:</dt><dd>SNIF Relay or SNIF Peripheral Service</dd>
+<dt>Connection to:</dt><dd>SNIF Relay or SNIF Peripheral Service</dd>
+</dl>
+        <t>
+   SNIF IPC FIFO is a permanent trusted connection between the SNIF
+   Relay and a SNIF Peripheral Process, or between a pair of nodes in a
+   SNIF Relay cluster. An IPC FIFO is usually unidirectional, but a
+   bidirectional connection can serve as a pair of FIFOs. An IPC FIFO
+   can be implemented as a Unix FIFO pipe, a TCP socket, an SSH tunnel
+   or by other means. The mechanism of establishing and maintaining IPC
+   FIFOs is implementation specific and is not covered by this document.</t>
+        <t>
+   The following SNIF Messages are defined over an IPC FIFO from the
+   perspective of a SNIF Relay:</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF CONNECT {conn_id} {dst_host}:{dst_port} {fwd_host}:{fwd_port} {cln_addr}:{cln_port}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Direction:</dt><dd>Send or Receive</dd>
+</dl>
+        <t>
+   (see <xref target="sect-4.1" format="default"/>).</t>
+        <t>
+   The SNIF CONNECT message is sent by a Relay over an IPC FIFO in case
+   the Relay failed to reach the respective Connector through Control
+   Connections. SNIF CONNECT sent by a Relay MUST be followed up
+   by one of SNIF CLEAR or SNIF CLOSE to inform the Peripheral Processes
+   of the further outcome. Even when the SNIF CONNECT is acted upon by a
+   peer Relay, the resulting Service Connection (TCP binding) or Service
+   stream (QUIC binding) is established to the {fwd_host} carried in the
+   message, which is the originating Relay; that Relay therefore always
+   observes the acceptance and is the one that emits the followup.</t>
+        <t>
+   When a SNIF CONNECT message is received by a Relay, the Relay SHOULD
+   forward it to any matching open Control Connections, or ignore it
+   otherwise.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF CLEAR {conn_id}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Direction:</dt><dd>Send</dd>
+</dl>
+        <t>
+   The SNIF CLEAR message SHOULD be sent by a Relay only as a followup
+   to SNIF CONNECT with a matching {conn_id}, in case the Client
+   Connection that triggered SNIF CONNECT was accepted by a Service
+   Connection. Because the Service Connection, or Service stream in the
+   QUIC binding, is always established to the originating Relay (the
+   {fwd_host} of the SNIF CONNECT), only that Relay processes the SNIF
+   ACCEPT and therefore only it sends SNIF CLEAR.</t>
+        <t>
+   The purpose of SNIF CLEAR is to advise Peripheral Processes to cease
+   further attempts of reaching the Connector by external means, not
+   specified within this document.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF CLOSE {conn_id}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Direction:</dt><dd>Send or Receive</dd>
+</dl>
+        <t>
+   (see <xref target="sect-4.1" format="default"/>).</t>
+        <t>
+   The SNIF CLOSE message SHOULD be sent by a Relay only as a followup
+   to SNIF CONNECT with a matching {conn_id}, in case the Client
+   Connection that triggered SNIF CONNECT was closed without being
+   accepted.</t>
+        <t>
+   When the SNIF CLOSE is received by a Relay, the Relay SHOULD
+   immediately close the matching Client and/or Service Connection if
+   any found, ignore the message otherwise.</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF ABUSE {conn_id} {abuse_score}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Direction:</dt><dd>Receive</dd>
+</dl>
+        <t>
+   (see <xref target="sect-4.1" format="default"/>).</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF MSG {hostname} {content}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Direction:</dt><dd>Send or Receive</dd>
+</dl>
+        <t>
+   (see <xref target="sect-4.1" format="default"/>).</t>
+        <artwork name="" type="" align="left" alt=""><![CDATA[
+   SNIF CTL {ctl_fd} {hostname} {remote_addr}:{remote_port}
+   SNIF CTL {ctl_fd}
+]]></artwork>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Direction:</dt><dd>Send</dd>
+</dl>
+        <t>
+   The SNIF CTL message is sent by a Relay to inform Peripheral
+   Processes about Control Connections. The first version is sent for
+   each opening Control Connection, and is followed up by the second
+   version with the matching {ctl_fd} when the Control Connection is
+   closed. {ctl_fd} is a numeric descriptor which is unique for open
+   connections, but can be reused after a connection is closed.</t>
+      </section>
+      <section anchor="sect-4.7" numbered="true" toc="default">
+        <name>Transport discovery and fallback</name>
+        <t>
+   The TCP binding (<xref target="sect-4.3" format="default"/>) is the mandatory
+   baseline; a Connector that cannot use QUIC, or that fails to establish
+   a QUIC connection, MUST be able to operate over TCP - unless its
+   deployment requires the server name to be concealed on the
+   infrastructure leg as well as the access leg, which requires the QUIC
+   binding (<xref target="sect-5.2" format="default"/>) combined with ECH
+   (<xref target="sect-4.9" format="default"/>). Such a Connector SHOULD
+   instead treat QUIC unreachability as a failure rather than falling back
+   to TCP, since the fallback would re-expose the server name on the
+   infrastructure leg (see the transport-downgrade discussion in
+   <xref target="sect-5.2" format="default"/>). Because the TCP
+   and QUIC bindings use different transport protocols, selection is by
+   attempt-and-fallback rather than in-band negotiation:</t>
+        <ul spacing="normal">
+          <li>A Connector that supports the QUIC binding SHOULD attempt a
+     QUIC connection to the Relay on UDP port 7123 (the registered "snif"
+     port, <xref target="sect-6" format="default"/>) first, offering ALPN
+     "snifq/1", and SHOULD fall back to the TCP binding
+     (<xref target="sect-4.3" format="default"/>) if the QUIC connection cannot
+     be established within a reasonable time or if "snifq/1" is not
+     negotiated.</li>
+          <li>A Relay MAY advertise QUIC support, including an alternative
+     UDP port, out of band (e.g. via the CA Proxy initiation response,
+     <xref target="sect-3" format="default"/>) so Connectors can skip the QUIC
+     attempt when it is known to be unavailable, or reach it on a
+     non-default port.</li>
+        </ul>
+        <t>
+   A Connector MUST NOT maintain both a TCP and a QUIC Control Connection
+   to the same Relay node for the same {hostname} simultaneously. A
+   Connector MAY, however, hold QUIC Control Connections for the same
+   {hostname} to several distinct nodes of a Relay cluster at once, as the
+   clustered case of <xref target="sect-4.4" format="default"/> requires.</t>
+      </section>
+      <section anchor="sect-4.8" numbered="true" toc="default">
+        <name>Abuse Management</name>
+        <t>
+   SNIF Relay SHOULD implement basic protection from denial of service.
+   A separate abuse count SHOULD be assigned to each remote address,
+   incremented by 1 on every incoming connection from the address,
+   incremented by a specified score on every received SNIF ABUSE
+   message, and periodically decremented or reset at regular time
+   intervals.</t>
+        <t>
+   If the abuse counter for a certain remote address reaches a
+   specific threshold, the Relay SHOULD drop any further TCP connections
+   from that address until the abuse counter goes below the threshold.
+   The Relay MAY allow some grace above the threshold to incoming
+   SNIF Service Connections, to minimize stalled Client Connections.</t>
+        <t>
+   SNIF Connector MAY implement basic protection from denial of service
+   by limiting the number of accepted connections per period of time
+   and/or the total number of open connections, and reject connections
+   over the limit.</t>
+      </section>
+      <section anchor="sect-4.9" numbered="true" toc="default">
+        <name>SNIF with Encrypted ClientHello (optional)</name>
+        <t>
+   A SNIF Relay MAY offer Encrypted ClientHello (ECH)
+   <xref target="RFC9849" format="default"/> so that the true server name a
+   Client requests is concealed from observers on the access leg between
+   the Client and the Relay (<xref target="sect-5.2" format="default"/>).
+   ECH is independent of the transport binding and MAY be combined with
+   either the TCP binding (<xref target="sect-4.3" format="default"/>) or
+   the QUIC binding (<xref target="sect-4.4" format="default"/>). When a
+   Relay offers ECH it acts as the ECH client-facing server in the
+   split-mode topology of <xref target="RFC9849" format="default"/>: it
+   terminates the ECH encryption only, never the end-to-end TLS session.</t>
+        <t>
+   <em>Keying.</em> A Relay that offers ECH holds a single ECH key pair for
+   the names it serves. The private key resides on the Relay only and is
+   never distributed to Connectors. In a Relay cluster
+   (<xref target="sect-4.4" format="default"/>) every node MUST hold this
+   ECH private key, because any node may receive a Client Connection and is
+   then the node that decrypts and reconstructs its ClientHello (below) in
+   order to route and serve it; the key is shared only among the mutually
+   trusted nodes of one logical Relay and is still never distributed to
+   Connectors. The corresponding ECHConfig, naming a
+   "public_name" within the Relay's own domain, is published in the DNS
+   HTTPS resource record <xref target="RFC9460" format="default"/> for the
+   SNIF hostnames the Relay serves; a single wildcard record MAY cover an
+   entire SNIF zone. Because the Relay recovers the routing name by
+   decryption (below) rather than from a per-Connector value, one ECHConfig
+   suffices for every Connector and no ECH state is required in a
+   Connector's DNS.</t>
+        <t>
+   <em>Client.</em> A SNIF Client is any ECH-capable TLS client. It resolves
+   the SNIF hostname, obtains the Relay's ECHConfig from the HTTPS record,
+   and connects to the Relay presenting the "public_name" as the outer
+   (visible) Server Name Indication, with its true (inner) ClientHello,
+   including the SNIF hostname, encrypted under the ECHConfig. The Client
+   requires no awareness of SNIF (<xref target="sect-1" format="default"/>).</t>
+        <t>
+   <em>Relay processing.</em> On receiving the Client's initial ClientHello
+   (<xref target="sect-4.5" format="default"/>) the Relay examines it for an
+   "encrypted_client_hello" extension of type "outer":</t>
+        <ul spacing="normal">
+          <li>If the extension is absent, the Relay routes on the cleartext
+     Server Name Indication exactly as in
+     <xref target="sect-4.5" format="default"/>.</li>
+          <li>If the extension is present and the Relay can decrypt it with
+     a held ECH key, the Relay MUST recover and reconstruct the inner
+     ClientHello as specified in <xref target="RFC9849" format="default"/>
+     (expanding any "ech_outer_extensions" compression against the outer
+     ClientHello). The reconstruction MUST be byte-exact, because the
+     reconstructed inner ClientHello is the message that both the Client
+     and the Connector incorporate into the TLS handshake transcript; any
+     deviation causes the handshake to fail. The Relay then routes on the
+     inner Server Name Indication as in
+     <xref target="sect-4.5" format="default"/> and forwards the
+     reconstructed inner ClientHello, in place of the outer one, as the
+     leading end-to-end TLS octets of the Service Connection.</li>
+          <li>If the extension is present but the Relay cannot decrypt it
+     (for example a decoy "GREASE" value
+     (<xref target="RFC9849" format="default"/>), or an unknown or rotated
+     configuration identifier), the Relay MUST treat ECH as not negotiated
+     and route on the cleartext (outer) Server Name Indication exactly as in
+     <xref target="sect-4.5" format="default"/> - with one exception. A
+     decoy ECH extension carries the Client's true name in that cleartext
+     SNI, so this routes it to its Connector normally. A genuine ECH
+     ClientHello the Relay cannot decrypt instead always carries the
+     Relay's own "public_name" as the outer SNI. Because "public_name"
+     names the Relay itself and matches no Connector, the Relay MUST NOT
+     attempt to route such a Client Connection: it MUST NOT emit a SNIF
+     CONNECT, forward over an IPC FIFO, or otherwise wait for a Connector
+     to accept, since no accept can arrive and the Client Connection would
+     only stall until it timed out
+     (<xref target="sect-4.5" format="default"/>). The Relay MUST instead
+     resolve the Client Connection immediately: by default it closes the
+     Client Connection, or, if it holds a certificate for "public_name", it
+     MAY complete the handshake as "public_name" and return fresh
+     "retry_configs" as the ECH rejection of
+     <xref target="RFC9849" format="default"/>. This retry_configs path is
+     OPTIONAL, and is the only circumstance in which a Relay terminates,
+     rather than forwards, a Client's TLS session, one that never carries
+     Connector traffic. A Relay that holds no certificate for "public_name"
+     MUST close the Client Connection.</li>
+        </ul>
+        <t>
+   <em>Connector.</em> The Connector terminates the end-to-end TLS session
+   from the reconstructed inner ClientHello as usual, and MAY ignore the
+   Server Name Indication as any single-host server may. It MUST, however,
+   implement the ECH backend behavior of
+   <xref target="RFC9849" format="default"/>: it MUST recognize the
+   inner-type "encrypted_client_hello" marker in the forwarded ClientHello
+   and emit the corresponding ECH acceptance signal in its ServerHello,
+   which an ECH-capable Client verifies. A Connector that omits this signal
+   is interpreted by the Client as ECH rejection, and the connection fails
+   rather than reaching the intended host. The Connector needs no ECH key
+   and performs no decryption; this backend behavior is the lighter half
+   of ECH.</t>
+        <t>
+   <em>Ecosystem-wide requirement.</em> Because a Relay publishes its
+   ECHConfig for a set of SNIF hostnames at once (typically a wildcard
+   record), every Connector reachable under those names MUST implement the
+   ECH backend behavior above; a Client directed by the record to use ECH
+   toward a Connector that does not will fail, and retrying does not help.
+   Offering ECH is therefore a joint decision of a Relay and all of its
+   Connectors. A deployment that needs ECH for only a subset of Connectors
+   MUST publish per-name HTTPS records for those names rather than a
+   wildcard.</t>
+        <t>
+   ECH conceals the server name only on the access leg between the Client
+   and the Relay; on the infrastructure leg the reconstructed inner
+   ClientHello carries it in the clear. A deployment that requires the
+   server name concealed on the infrastructure leg as well SHOULD combine
+   ECH with the QUIC binding (<xref target="sect-4.4" format="default"/>),
+   which encrypts that leg; the two mechanisms are complementary, and the
+   per-leg exposure trade-offs are set out in
+   <xref target="sect-5.2" format="default"/>.</t>
+      </section>
+    </section>
+    <section anchor="sect-5" numbered="true" toc="default">
+      <name>Security Considerations</name>
+      <t>
+   Requests to CA Proxy (<xref target="sect-3" format="default"/>) sent over plain unencrypted HTTP,
+   including a PKCS#10 CSR in the CSR Submission Request payload, do not
+   contain sensitive information.</t>
+      <t>
+   The response to the CN Allocation Request, if sent over plain HTTP,
+   is a randomly generated hostname or wildcard, that will also be
+   publicly exposed through Certificate Transparency once the
+   Certificate is issued. Any attempt by an intruder to submit an
+   alternate CSR for the issued CN prior to the legitimate Connector,
+   will result in a certificate that doesn't match the Connector's
+   private key, therefore the Connector will need to hard reset and
+   redo the initialization. If the intruder alters the X-SNIF-CN:
+   response sent to the Connector, the CSR submission for a bad CN will
+   be rejected by the CA Proxy, which will also require to hard reset
+   the Connector.</t>
+      <t>
+   The content of the Certificate Download Request response is an X.509
+   certificate which is safe to be exposed to any parties.
+   If the intruder alters the HTTP response to the CSR Submission Request or
+   to the Certificate Download request, the Connector won't receive a
+   valid certificate and will need a hard reset.</t>
+      <t>
+   SNIF Connector SHOULD NOT send its hostname to any parties until it
+   downloads and successfully validates the Certificate from the CA
+   Proxy.</t>
+      <t>
+   To mitigate request flooding potentially resulting in denial of
+   service, it is RECOMMENDED for SNIF CA Proxy to require a Certificate
+   issuance authorization.  For SNIF Connectors that have a means of
+   interacting with a user, such as a console or a web browser, the CA
+   Proxy SHOULD implement an interactive authorization mechanism not
+   described in this document, and return {authUrl} to the Connector
+   (<xref target="sect-3.5" format="default"/>); the Connector SHOULD then present {authUrl}
+   to the user to complete the process.</t>
+      <t>
+   For a SNIF CA Proxy that intends to work with Connectors that have
+   limited or no means of interacting with a user, some
+   non-interactive Certificate issuance authorization mechanism SHOULD
+   be implemented. As an example of such mechanism, each SNIF Connector
+   can have a unique {initUrl} that MUST be HTTPS to avoid possible
+   interception, and each Connector is supplied with a unique setup URL
+   presented to the user, the CA Proxy properly mapping each setup URL
+   to the matching {initUrl}, and using the setup URL to authorize the
+   certificate issuance and to communicate the SNIF Connector's hostname
+   to the user's browser. Such mechanism MUST have a means of alerting
+   the user about misrouted setup, when some agent other than the
+   legitimate user has used the same setup URL during the setup
+   process, in which case the user MUST be instructed to immediately hard
+   reset the Connector and repeat the setup. Such mechanism is RECOMMENDED
+   to use an HTTPS {apiUrl} (<xref target="sect-3.1" format="default"/>); otherwise it MUST
+   provide a means to prevent or detect intercepted setup when an
+   intruder alters a submitted CSR, such as an out-of-band indication of
+   setup completion (for example, status lights on a hardware device).
+   The details of such
+   mechanism are not covered by this document.</t>
+      <t>
+   Since each certificate issued by a CA remains on the certificate
+   transparency public records, it is RECOMMENDED for SNIF CA Proxy
+   to only issue Certificates with a wildcard CN. This way, the
+   actual Connector's hostname (<xref target="sect-3.2" format="default"/>) will not be listed on the
+   public records.</t>
+      <t>
+   SNIF IPC FIFO connections SHOULD only be established between mutually
+   trusted parties, and need to be secured by external means specific to
+   the implementation, such as filesystem permissions, TLS or SSH
+   tunnels etc. The security of such external means cannot be assessed
+   within the scope of this document.</t>
+      <t>
+   A compromised SNIF CA Proxy can potentially issue certificates to any
+   hostnames allocated by the Relay, including a catch-all wildcard,
+   using an alternative private key, and thus allow a man-in-the-middle
+   attack on any SNIF Connectors associated with the Relay. This
+   vulnerability can be mitigated by constant monitoring of public TLS
+   Transparency logs, such as <xref target="RFC6962" format="default"/>. At least one independent party
+   SHOULD continuously monitor TLS Transparency logs for each deployed
+   SNIF CA Proxy and Relay. Once any duplicate or overlapping
+   certificates are detected - the corresponding SNIF Relay MUST be
+   permanently deemed compromised.</t>
+      <section anchor="sect-5.1" numbered="true" toc="default">
+        <name>Blind-relay property (applies to all transport bindings)</name>
+        <t>
+   The security of SNIF rests on the SNIF Relay being unable to read or
+   alter the traffic it forwards. Under every transport binding
+   (<xref target="sect-4.3" format="default"/>, <xref target="sect-4.4" format="default"/>)
+   the SNIF Relay MUST route a SNIF Client Connection to a SNIF Connector
+   using only the Server Name Indication of the Client's TLS ClientHello,
+   and MUST forward the Service Connection payload as opaque octets
+   without the means to decrypt it. The private key of the Connector's
+   certificate MUST NOT be transmitted to, derivable by, or stored on the
+   Relay. Consequently a compromised Relay can deny service, observe
+   traffic volume and timing, and learn the routable server name of each
+   connection (<xref target="sect-5.2" format="default"/>), but cannot read or
+   forge the end-to-end TLS content. From the Client's perspective the
+   SNIF Client Connection is a TLS session with a trusted certificate;
+   the security of the TLS content between the Client and the Connector
+   is specific to the protocol carried and is unchanged by the choice of
+   binding.</t>
+      </section>
+      <section anchor="sect-5.2" numbered="true" toc="default">
+        <name>Routing name exposure on the infrastructure leg</name>
+        <t>
+   SNIF forwarding requires the Relay to read a routable server name from
+   the Client's ClientHello. That name is the Connector's SNIF hostname,
+   which is already public (it appears in Certificate Transparency logs;
+   see the wildcard-CN guidance earlier in this section). The Relay
+   therefore necessarily learns which Connector each Client reaches; this
+   is inherent to SNIF and is not concealed by any binding.</t>
+        <t>
+   The bindings differ, however, in what an on-path observer between the
+   Relay and the Connector can see:</t>
+        <ul spacing="normal">
+          <li>In the TCP binding (<xref target="sect-4.3" format="default"/>), the
+     Service Connection carries the Client's end-to-end TLS as plain TCP.
+     The Client's ClientHello, including the cleartext Server Name
+     Indication, is visible to any observer on the Relay-to-Connector
+     path.</li>
+          <li>In the QUIC binding (<xref target="sect-4.4" format="default"/>), the
+     Service Connection is a stream within the Relay-to-Connector QUIC
+     connection and is thus encrypted on that leg; the Server Name
+     Indication is concealed from on-path observers there (though not
+     from the Relay itself).</li>
+        </ul>
+        <t>
+   A Connector whose deployment requires the server name to be hidden
+   from on-path observers on the infrastructure leg SHOULD use the QUIC
+   binding (<xref target="sect-4.4" format="default"/>). The QUIC binding
+   does not, however, conceal the Server Name Indication on the access leg
+   between the Client and the Relay: that is the Client's own ClientHello,
+   sent in the clear under every binding. Encrypted ClientHello (ECH)
+   <xref target="RFC9849" format="default"/>, where a Relay offers it
+   (<xref target="sect-4.9" format="default"/>), is the only mechanism in
+   this document that conceals the server name on the access leg. It hides
+   the true (inner) name from observers between the Client and the Relay,
+   and keeps a specific name that sits below a public wildcard out of
+   Certificate Transparency. ECH does not conceal the routing name from
+   the Relay itself, which decrypts it to route
+   (<xref target="sect-4.9" format="default"/>), nor from observers on the
+   infrastructure leg, where the reconstructed inner ClientHello again
+   carries the name in the clear unless the QUIC binding is also used. ECH
+   and the QUIC binding are therefore complementary rather than
+   alternatives: ECH covers the access leg, the QUIC binding covers the
+   infrastructure leg.</t>
+        <t>
+   Transport downgrade: because binding selection is by attempt-and-
+   fallback (<xref target="sect-4.7" format="default"/>), a network attacker who
+   blocks QUIC (UDP) can force a Connector to fall back to the TCP binding
+   and thereby re-expose the routing name on the infrastructure leg. A
+   Connector that depends on the QUIC binding's infrastructure-leg
+   confidentiality SHOULD treat QUIC unreachability as a failure rather
+   than silently falling back, and a Relay SHOULD advertise QUIC
+   availability out of band (<xref target="sect-4.7" format="default"/>) so that
+   an unexpected fallback is detectable.</t>
+      </section>
+      <section anchor="sect-5.3" numbered="true" toc="default">
+        <name>Connection authentication and connection-identifier confidentiality</name>
+        <t>
+   In the TCP binding, the Control Connection is a reverse TLS session in
+   which the Connector authenticates as the TLS server using its SNIF
+   certificate and the Relay validates it; in high-security settings the
+   Connector SHOULD be configured with {relayHost}
+   (<xref target="sect-4.2" format="default"/>), in which case the Relay
+   MUST supply a client certificate valid for {relayHost} and the
+   Connector MUST immediately terminate the Control Connection if the
+   certificate is absent or does not match. If the Connector
+   does not validate a client certificate from the Relay, it MUST NOT send
+   sensitive information in SNIF MSG messages and MUST NOT consider
+   messages received from the Relay to be trusted. The {conn_id} of a
+   Service Connection is sent over an unsecured TCP connection; it is
+   single-use and is only actionable by the targeted Connector, and all
+   subsequent octets are end-to-end TLS.</t>
+        <t>
+   In the QUIC binding, the Connector authenticates as the QUIC client
+   using TLS client authentication, presenting the same SNIF certificate
+   and proving possession of its private key without ever exposing the
+   key, and the Relay MUST validate it with the same trust rules, closing
+   the connection on failure. The Relay, as QUIC server, presents its own
+   certificate; a Connector configured with {relayHost}
+   (<xref target="sect-4.2" format="default"/>) MUST validate the Relay's
+   certificate against it, closing the connection on mismatch.
+   Because the control
+   stream and all Service streams share this single authenticated,
+   encrypted QUIC connection, the SNIF CONNECT and the SNIF ACCEPT
+   preamble, including {conn_id}, are not exposed in cleartext on the
+   wire, removing the cleartext {conn_id} exposure of the TCP Service
+   Connection. In contrast to the TCP
+   binding, where the Relay need not present a certificate at all, the
+   QUIC binding always requires the Relay to present a server
+   certificate, so a Connector configured with {relayHost} can
+   authenticate the Relay on every connection.</t>
+        <t>
+   When {relayHost} (<xref target="sect-4.2" format="default"/>) is not
+   configured, the Connector does not authenticate the Relay, in either
+   binding. An active on-path attacker that can impersonate the Relay may
+   then observe connection metadata - notably the {conn_id} and the SNIF
+   Messages on the Control Connection - and, in the TCP binding, redirect
+   the Connector to a substitute Relay. It cannot read the forwarded
+   Client traffic, which remains end-to-end TLS terminated only on the
+   Connector. Operators that require infrastructure-leg confidentiality
+   or Relay authenticity SHOULD configure {relayHost}.</t>
+      </section>
+      <section anchor="sect-5.4" numbered="true" toc="default">
+        <name>QUIC resource and denial-of-service considerations</name>
+        <t>
+   The QUIC binding multiplexes all of a Connector's forwarded sessions
+   onto one connection, which changes the resource-exhaustion surface:</t>
+        <ul spacing="normal">
+          <li>Connection admission. Because the QUIC binding mirrors the
+     TCP accept flow (<xref target="sect-4.4" format="default"/>), the
+     Connector opens a client-initiated Service stream only for
+     connections it accepts, so no Client payload reaches the Connector
+     before it admits the connection, exactly as in the TCP binding. The
+     only unsolicited traffic a flood of Client connections can impose on
+     the Connector is the small SNIF CONNECT messages on the control
+     stream, which the Relay's abuse counting
+     (<xref target="sect-4.8" format="default"/>) already gates; rejecting
+     a connection (by not opening a stream, optionally with SNIF CLOSE)
+     costs the Connector nothing beyond reading that message. This avoids
+     the unsolicited-push exposure a relay-initiated stream design would
+     have on a constrained or slow Connector link.</li>
+          <li>Cross-node Control Connections. In a Relay cluster a
+     Connector may hold Control Connections to several nodes at once
+     (<xref target="sect-4.4" format="default"/>), each opened reactively
+     and authenticated with the Connector's SNIF certificate, so they are
+     not an avenue for unauthenticated parties and their count is bounded
+     by the cluster size rather than by the number of Clients. A Relay
+     SHOULD apply the same abuse counting
+     (<xref target="sect-4.8" format="default"/>) and per-Connector stream
+     and flow-control limits to each. Because the same SNIF MSG may be
+     delivered to a Connector on each of these connections, SNIF MSG
+     handling MUST be idempotent
+     (<xref target="sect-4.1" format="default"/>,
+     <xref target="sect-4.4" format="default"/>).</li>
+          <li>Stream concurrency. The Connector opens a client-initiated
+     Service stream per accepted Client Connection, bounded by the Relay's
+     advertised MAX_STREAMS <xref target="RFC9000" format="default"/>. The
+     Relay SHOULD use MAX_STREAMS to cap the number of concurrent forwarded
+     sessions per Connector; the Connector likewise SHOULD limit how many
+     it opens. The Connector already controls concurrency in the TCP
+     binding, where it chooses whether to dial back a Service Connection in
+     response to each SNIF CONNECT; MAX_STREAMS provides the equivalent
+     control as an explicit, Relay-advertised limit native to the
+     transport, rather than adding backpressure the TCP binding lacked.</li>
+          <li>Flow-control starvation. A single greedy forwarded session
+     could otherwise consume the connection's flow-control budget and
+     starve sibling Service streams. A Relay and a Connector SHOULD set
+     per-stream and per-connection flow-control limits so no one session
+     can starve the others.</li>
+          <li>Amplification. The Connector is the QUIC client (initiator),
+     so the standard QUIC anti-amplification limit applies and the Relay
+     (QUIC server) MUST NOT be usable as an amplification reflector. The
+     SNIF ABUSE mechanism continues to apply per {conn_id} / Service
+     stream.</li>
+          <li>0-RTT. If 0-RTT is used to resume the QUIC connection, early
+     data MUST be limited to idempotent operations; in particular,
+     control messages whose replay could cause harm MUST NOT be sent in
+     0-RTT. Re-sending SNIF LISTEN for the same {hostname} is idempotent
+     and is permitted.</li>
+        </ul>
+      </section>
+      <section anchor="sect-5.5" numbered="true" toc="default">
+        <name>Connection consolidation (availability trade)</name>
+        <t>
+   Consolidating a Connector's sessions onto one QUIC connection improves
+   resilience to packet loss (loss on one stream does not stall others)
+   but concentrates connection-level faults: a QUIC connection close,
+   stateless reset, or path failure drops all of that Connector's
+   forwarded sessions at once, whereas independent TCP Service
+   Connections fail independently. The dropped forwarded sessions cannot
+   themselves be re-established: each is an end-to-end TLS session
+   terminated on the Client and the Connector, so once its transport is
+   gone the session is irrecoverable and the affected Clients simply
+   reconnect, which the Relay forwards as fresh Service streams.
+   Re-establishment therefore applies to the Control Connection, not to
+   the individual Service streams: a Connector using the QUIC binding
+   SHOULD detect connection loss promptly and re-establish the Control
+   Connection, so that those Client reconnections can be served again.</t>
+      </section>
+      <section anchor="sect-5.6" numbered="true" toc="default">
+        <name>CA Proxy trust is independent of the relay transport</name>
+        <t>
+   The man-in-the-middle exposure from a compromised SNIF CA Proxy
+   issuing certificates under an alternative key (described earlier in
+   this section, with its Certificate Transparency monitoring mitigation)
+   is a property of the certificate-issuance trust model and is unaffected
+   by the choice of relay transport binding. Neither the TCP binding nor
+   the QUIC binding adds to nor reduces that exposure.</t>
+      </section>
+    </section>
+    <section anchor="sect-6" numbered="true" toc="default">
+      <name>IANA Considerations</name>
+      <t>
+   Service Names "snif", "snif-srv", "snif-cln" and "snif-fifo" are
+   registered with IANA.</t>
+      <t>
+   TCP port 7123 is registered with IANA for service "snif".</t>
+      <t>
+   This document also requests that UDP port 7123 be assigned to service
+   "snif" for the SNIF over QUIC binding
+   (<xref target="sect-4.4" format="default"/>), matching the existing TCP
+   assignment.</t>
+      <t>
+   This document additionally requests registration of the following
+   protocol identifier in the "TLS Application-Layer Protocol Negotiation
+   (ALPN) Protocol IDs" registry <xref target="RFC7301" format="default"/>,
+   identifying the SNIF over QUIC binding (<xref target="sect-4.4" format="default"/>):</t>
+        <dl newline="false" spacing="normal" indent="18">
+<dt>Protocol:</dt><dd>SNIF over QUIC</dd>
+<dt>Identification Sequence:</dt><dd>0x73 0x6E 0x69 0x66 0x71 0x2F 0x31 ("snifq/1")</dd>
+<dt>Reference:</dt><dd>This document, <xref target="sect-4.4" format="default"/></dd>
+</dl>
+    </section>
+  </middle>
+  <back>
+    <references>
+      <name>References</name>
+      <references>
+        <name>Normative References</name>
+        <reference anchor="RFC2119" target="https://www.rfc-editor.org/info/rfc2119" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.2119.xml">
+          <front>
+            <title>Key words for use in RFCs to Indicate Requirement Levels</title>
+            <author initials="S." surname="Bradner" fullname="S. Bradner">
+              <organization/>
+            </author>
+            <date year="1997" month="March"/>
+            <abstract>
+              <t>In many standards track documents several words are used to signify the requirements in the specification.  These words are often capitalized. This document defines these words as they should be interpreted in IETF documents.  This document specifies an Internet Best Current Practices for the Internet Community, and requests discussion and suggestions for improvements.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="BCP" value="14"/>
+          <seriesInfo name="RFC" value="2119"/>
+          <seriesInfo name="DOI" value="10.17487/RFC2119"/>
+        </reference>
+        <reference anchor="RFC2986" target="https://www.rfc-editor.org/info/rfc2986" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.2986.xml">
+          <front>
+            <title>PKCS #10: Certification Request Syntax Specification Version 1.7</title>
+            <author initials="M." surname="Nystrom" fullname="M. Nystrom">
+              <organization/>
+            </author>
+            <author initials="B." surname="Kaliski" fullname="B. Kaliski">
+              <organization/>
+            </author>
+            <date year="2000" month="November"/>
+            <abstract>
+              <t>This memo represents a republication of PKCS #10 v1.7 from RSA Laboratories' Public-Key Cryptography Standards (PKCS) series, and change control is retained within the PKCS process.  The body of this document, except for the security considerations section, is taken directly from the PKCS #9 v2.0 or the PKCS #10 v1.7 document.  This memo provides information for the Internet community.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="2986"/>
+          <seriesInfo name="DOI" value="10.17487/RFC2986"/>
+        </reference>
+        <reference anchor="RFC5280" target="https://www.rfc-editor.org/info/rfc5280" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.5280.xml">
+          <front>
+            <title>Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile</title>
+            <author initials="D." surname="Cooper" fullname="D. Cooper">
+              <organization/>
+            </author>
+            <author initials="S." surname="Santesson" fullname="S. Santesson">
+              <organization/>
+            </author>
+            <author initials="S." surname="Farrell" fullname="S. Farrell">
+              <organization/>
+            </author>
+            <author initials="S." surname="Boeyen" fullname="S. Boeyen">
+              <organization/>
+            </author>
+            <author initials="R." surname="Housley" fullname="R. Housley">
+              <organization/>
+            </author>
+            <author initials="W." surname="Polk" fullname="W. Polk">
+              <organization/>
+            </author>
+            <date year="2008" month="May"/>
+            <abstract>
+              <t>This memo profiles the X.509 v3 certificate and X.509 v2 certificate revocation list (CRL) for use in the Internet.  An overview of this approach and model is provided as an introduction.  The X.509 v3 certificate format is described in detail, with additional information regarding the format and semantics of Internet name forms.  Standard certificate extensions are described and two Internet-specific extensions are defined.  A set of required certificate extensions is specified.  The X.509 v2 CRL format is described in detail along with standard and Internet-specific extensions.  An algorithm for X.509 certification path validation is described.  An ASN.1 module and examples are provided in the appendices.  [STANDARDS-TRACK]</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="5280"/>
+          <seriesInfo name="DOI" value="10.17487/RFC5280"/>
+        </reference>
+        <reference anchor="RFC6066" target="https://www.rfc-editor.org/info/rfc6066" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.6066.xml">
+          <front>
+            <title>Transport Layer Security (TLS) Extensions: Extension Definitions</title>
+            <author initials="D." surname="Eastlake 3rd" fullname="D. Eastlake 3rd">
+              <organization/>
+            </author>
+            <date year="2011" month="January"/>
+            <abstract>
+              <t>This document provides specifications for existing TLS extensions.  It is a companion document for RFC 5246, "The Transport Layer Security (TLS) Protocol Version 1.2".  The extensions specified are server_name, max_fragment_length, client_certificate_url, trusted_ca_keys, truncated_hmac, and status_request.  [STANDARDS-TRACK]</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="6066"/>
+          <seriesInfo name="DOI" value="10.17487/RFC6066"/>
+        </reference>
+        <reference anchor="RFC7301" target="https://www.rfc-editor.org/info/rfc7301">
+          <front>
+            <title>Transport Layer Security (TLS) Application-Layer Protocol Negotiation Extension</title>
+            <author initials="S." surname="Friedl" fullname="S. Friedl">
+              <organization/>
+            </author>
+            <author initials="A." surname="Popov" fullname="A. Popov">
+              <organization/>
+            </author>
+            <author initials="A." surname="Langley" fullname="A. Langley">
+              <organization/>
+            </author>
+            <author initials="E." surname="Stephan" fullname="E. Stephan">
+              <organization/>
+            </author>
+            <date year="2014" month="July"/>
+            <abstract>
+              <t>This document describes a Transport Layer Security (TLS) extension for application-layer protocol negotiation within the TLS handshake.  For instances in which multiple application protocols are supported on the same TCP or UDP port, this extension allows the application layer to negotiate which protocol will be used within the TLS connection.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="7301"/>
+          <seriesInfo name="DOI" value="10.17487/RFC7301"/>
+        </reference>
+        <reference anchor="RFC8174" target="https://www.rfc-editor.org/info/rfc8174" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.8174.xml">
+          <front>
+            <title>Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words</title>
+            <author initials="B." surname="Leiba" fullname="B. Leiba">
+              <organization/>
+            </author>
+            <date year="2017" month="May"/>
+            <abstract>
+              <t>RFC 2119 specifies common key words that may be used in protocol  specifications.  This document aims to reduce the ambiguity by clarifying that only UPPERCASE usage of the key words have the  defined special meanings.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="BCP" value="14"/>
+          <seriesInfo name="RFC" value="8174"/>
+          <seriesInfo name="DOI" value="10.17487/RFC8174"/>
+        </reference>
+	<reference anchor="RFC8446" target="https://www.rfc-editor.org/info/rfc8446">
+	  <front>
+	    <title>The Transport Layer Security (TLS) Protocol Version 1.3</title>
+	    <author initials="E." surname="Rescorla" fullname="E. Rescorla">
+	      <organization/>
+	    </author>
+	    <date year="2018" month="August"/>
+	    <abstract>
+	      <t>This document specifies version 1.3 of the Transport Layer Security (TLS) protocol. TLS allows client/server applications to communicate over the Internet in a way that is designed to prevent eavesdropping, tampering, and message forgery.</t>
+	      <t>This document updates RFCs 5705 and 6066, and obsoletes RFCs 5077, 5246, and 6961. This document also specifies new requirements for TLS 1.2 implementations.</t>
+	    </abstract>
+	  </front>
+	  <seriesInfo name="RFC" value="8446"/>
+	  <seriesInfo name="DOI" value="10.17487/RFC8446"/>
+	</reference>
+        <reference anchor="RFC9000" target="https://www.rfc-editor.org/info/rfc9000">
+          <front>
+            <title>QUIC: A UDP-Based Multiplexed and Secure Transport</title>
+            <author initials="J." surname="Iyengar" fullname="J. Iyengar" role="editor">
+              <organization/>
+            </author>
+            <author initials="M." surname="Thomson" fullname="M. Thomson" role="editor">
+              <organization/>
+            </author>
+            <date year="2021" month="May"/>
+            <abstract>
+              <t>This document defines the core of the QUIC transport protocol.  QUIC provides applications with flow-controlled streams for structured communication, low-latency connection establishment, and network path migration.  QUIC includes security measures that ensure confidentiality, integrity, and availability in a range of deployment circumstances.  Accompanying documents describe the integration of TLS for key negotiation, loss detection, and an exemplary congestion control algorithm.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="9000"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9000"/>
+        </reference>
+        <reference anchor="RFC9001" target="https://www.rfc-editor.org/info/rfc9001">
+          <front>
+            <title>Using TLS to Secure QUIC</title>
+            <author initials="M." surname="Thomson" fullname="M. Thomson" role="editor">
+              <organization/>
+            </author>
+            <author initials="S." surname="Turner" fullname="S. Turner" role="editor">
+              <organization/>
+            </author>
+            <date year="2021" month="May"/>
+            <abstract>
+              <t>This document describes how Transport Layer Security (TLS) is used to secure QUIC.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="9001"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9001"/>
+        </reference>
+        <reference anchor="RFC9460" target="https://www.rfc-editor.org/info/rfc9460">
+          <front>
+            <title>Service Binding and Parameter Specification via the DNS (SVCB and HTTPS Resource Records)</title>
+            <author initials="B." surname="Schwartz" fullname="B. Schwartz">
+              <organization/>
+            </author>
+            <author initials="M." surname="Bishop" fullname="M. Bishop">
+              <organization/>
+            </author>
+            <author initials="E." surname="Nygren" fullname="E. Nygren">
+              <organization/>
+            </author>
+            <date year="2023" month="November"/>
+            <abstract>
+              <t>This document specifies the "SVCB" and "HTTPS" DNS resource record (RR) types to facilitate the lookup of information needed to make connections to network services, such as for HTTP origins.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="9460"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9460"/>
+        </reference>
+        <reference anchor="RFC9849" target="https://www.rfc-editor.org/info/rfc9849">
+          <front>
+            <title>TLS Encrypted Client Hello</title>
+            <author initials="E." surname="Rescorla" fullname="E. Rescorla">
+              <organization/>
+            </author>
+            <author initials="K." surname="Oku" fullname="K. Oku">
+              <organization/>
+            </author>
+            <author initials="N." surname="Sullivan" fullname="N. Sullivan">
+              <organization/>
+            </author>
+            <author initials="C. A." surname="Wood" fullname="C. A. Wood">
+              <organization/>
+            </author>
+            <date year="2026" month="March"/>
+            <abstract>
+              <t>This document describes a mechanism in Transport Layer Security (TLS) for encrypting a ClientHello message under a server public key.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="9849"/>
+          <seriesInfo name="DOI" value="10.17487/RFC9849"/>
+        </reference>
+      </references>
+      <references>
+        <name>Informative References</name>
+        <reference anchor="RFC3629" target="https://www.rfc-editor.org/info/rfc3629" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.3629.xml">
+          <front>
+            <title>UTF-8, a transformation format of ISO 10646</title>
+            <author initials="F." surname="Yergeau" fullname="F. Yergeau">
+              <organization/>
+            </author>
+            <date year="2003" month="November"/>
+            <abstract>
+              <t>ISO/IEC 10646-1 defines a large character set called the Universal Character Set (UCS) which encompasses most of the world's writing systems.  The originally proposed encodings of the UCS, however, were not compatible with many current applications and protocols, and this has led to the development of UTF-8, the object of this memo.  UTF-8 has the characteristic of preserving the full US-ASCII range, providing compatibility with file systems, parsers and other software that rely on US-ASCII values but are transparent to other values.  This memo obsoletes and replaces RFC 2279.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="STD" value="63"/>
+          <seriesInfo name="RFC" value="3629"/>
+          <seriesInfo name="DOI" value="10.17487/RFC3629"/>
+        </reference>
+        <reference anchor="RFC5967" target="https://www.rfc-editor.org/info/rfc5967" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.5967.xml">
+          <front>
+            <title>The application/pkcs10 Media Type</title>
+            <author initials="S." surname="Turner" fullname="S. Turner">
+              <organization/>
+            </author>
+            <date year="2010" month="August"/>
+            <abstract>
+              <t>This document specifies a media type used to carry PKCS #10 certification requests as defined in RFC 2986.  It carries over the original specification from RFC 2311, which recently has been moved to Historic status, and properly links it to RFC 2986.  This document  is not an Internet Standards Track specification; it is published for  informational purposes.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="5967"/>
+          <seriesInfo name="DOI" value="10.17487/RFC5967"/>
+        </reference>
+        <reference anchor="RFC6962" target="https://www.rfc-editor.org/info/rfc6962" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.6962.xml">
+          <front>
+            <title>Certificate Transparency</title>
+            <author initials="B." surname="Laurie" fullname="B. Laurie">
+              <organization/>
+            </author>
+            <author initials="A." surname="Langley" fullname="A. Langley">
+              <organization/>
+            </author>
+            <author initials="E." surname="Kasper" fullname="E. Kasper">
+              <organization/>
+            </author>
+            <date year="2013" month="June"/>
+            <abstract>
+              <t>This document describes an experimental protocol for publicly logging the existence of Transport Layer Security (TLS) certificates as they are issued or observed, in a manner that allows anyone to audit certificate authority (CA) activity and notice the issuance of suspect certificates as well as to audit the certificate logs themselves.  The intent is that eventually clients would refuse to honor certificates that do not appear in a log, effectively forcing CAs to add all issued certificates to the logs.</t>
+              <t>Logs are network services that implement the protocol operations for submissions and queries that are defined in this document.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="6962"/>
+          <seriesInfo name="DOI" value="10.17487/RFC6962"/>
+        </reference>
+        <reference anchor="RFC8555" target="https://www.rfc-editor.org/info/rfc8555" xml:base="https://xml2rfc.tools.ietf.org/public/rfc/bibxml/reference.RFC.8555.xml">
+          <front>
+            <title>Automatic Certificate Management Environment (ACME)</title>
+            <author initials="R." surname="Barnes" fullname="R. Barnes">
+              <organization/>
+            </author>
+            <author initials="J." surname="Hoffman-Andrews" fullname="J. Hoffman-Andrews">
+              <organization/>
+            </author>
+            <author initials="D." surname="McCarney" fullname="D. McCarney">
+              <organization/>
+            </author>
+            <author initials="J." surname="Kasten" fullname="J. Kasten">
+              <organization/>
+            </author>
+            <date year="2019" month="March"/>
+            <abstract>
+              <t>Public Key Infrastructure using X.509 (PKIX) certificates are used for a number of purposes, the most significant of which is the authentication of domain names.  Thus, certification authorities (CAs) in the Web PKI are trusted to verify that an applicant for a certificate legitimately represents the domain name(s) in the certificate.  As of this writing, this verification is done through a collection of ad hoc mechanisms.  This document describes a protocol that a CA and an applicant can use to automate the process of verification and certificate issuance.  The protocol also provides facilities for other certificate management functions, such as certificate revocation.</t>
+            </abstract>
+          </front>
+          <seriesInfo name="RFC" value="8555"/>
+          <seriesInfo name="DOI" value="10.17487/RFC8555"/>
+        </reference>
+      </references>
+    </references>
+    <section anchor="appendix-a" numbered="false" toc="default">
+      <name>Changes from draft-zubov-snif-04</name>
+      <t>
+   This appendix summarizes the substantive changes in this revision. It
+   is to be removed before publishing as an RFC.</t>
+      <ul spacing="normal">
+        <li>Retitled from "... on IoT Devices ..." to "... on Devices
+     Behind NAT ..." and generalized the Introduction and Overview so
+     that an IoT device is presented as a common example rather than a
+     constraint; SNIF applies to any device, service, or software that is
+     behind NAT, on a dynamic address, or otherwise unable to accept
+     inbound connections. The draft name and the "SNIF" abbreviation are
+     unchanged.</li>
+        <li>Restructured the SNIF Relay Protocol Suite (Section 4) into a
+     transport-neutral layer and two interchangeable transport bindings.
+     The SNIF Message wire formats are unchanged, so existing TCP
+     deployments remain conformant.</li>
+        <li>Lifted the full SNIF Message catalog into Section 4.1 and added
+     a new Section 4.2 (SNIF Connection Roles) that names the Control,
+     Service, Client, and IPC FIFO roles and states the blind-relay
+     invariant.</li>
+        <li>Folded the former Control (snif) and Service (snif-srv)
+     connection mechanics into Section 4.3 (SNIF over TCP), now the
+     mandatory baseline binding.</li>
+        <li>Added Section 4.4 (SNIF over QUIC), an OPTIONAL binding that
+     carries the Control Connection and all Service Connections as
+     streams of a single QUIC connection, replacing the per-Client
+     outbound connection and its transport handshake with a lightweight
+     per-Client stream open and isolating forwarded sessions per stream.
+     The binding mirrors the TCP accept flow: the Connector opens each
+     Service stream and admits the connection with SNIF ACCEPT, so no
+     Client payload reaches the Connector before it accepts.</li>
+        <li>Added Section 4.7 (Transport discovery and fallback): QUIC is
+     attempted first and falls back to TCP; the ALPN identifier
+     "snifq/1" version-tags the QUIC binding.</li>
+        <li>Reorganized the Security Considerations (Section 5) to name the
+     blind-relay property, describe infrastructure-leg Server Name
+     Indication exposure and Encrypted ClientHello, scope the cleartext
+     {conn_id} exposure to the TCP binding, and add QUIC resource/DoS and
+     connection-consolidation considerations. The CA Proxy trust
+     considerations are unchanged.</li>
+        <li>Added IANA requests to register the ALPN protocol identifier
+     "snifq/1" and to assign UDP port 7123 to "snif" for the QUIC
+     binding. Added normative references RFC 9000 and RFC 9001 (QUIC) and
+     RFC 7301 (ALPN), and a normative reference to RFC 9849 (Encrypted
+     ClientHello).</li>
+        <li>Added an optional {relayHost} Connector configuration
+     (Section 4.2): the hostname identifying the Relay's TLS certificate.
+     When set, the Connector MUST validate the certificate presented by
+     the Relay against {relayHost} in both the TCP and QUIC bindings;
+     when unset, the Relay certificate is not authenticated. {apiUrl} is
+     now used only for CA Proxy enrollment and no longer plays a
+     relay-authentication role.</li>
+        <li>The Relay SHOULD close the Control Connection if the host
+     named in the Connector's certificate does not fall within any of the
+     domains the Relay serves.</li>
+        <li>Added Section 4.9 (SNIF with Encrypted ClientHello), an
+     OPTIONAL feature in which the Relay holds a single ECH key, publishes
+     the ECHConfig in the DNS HTTPS resource record, and acts as the ECH
+     client-facing server: it decrypts the ClientHello solely to recover
+     and route on the inner Server Name Indication, reconstructs the inner
+     ClientHello byte-exactly, and forwards it in place of the outer one,
+     while the Connector supplies the ECH acceptance signal without holding
+     any ECH key. Section 4.2 records this ECH unwrap as the sole permitted
+     exception to the blind-relay invariant, and Section 5.2 is rewritten
+     to state that ECH conceals the server name on the access leg while the
+     QUIC binding conceals it on the infrastructure leg. Added a
+     normative reference to RFC 9460 (SVCB/HTTPS DNS records).</li>
+      </ul>
+    </section>
+  </back>
+</rfc>
